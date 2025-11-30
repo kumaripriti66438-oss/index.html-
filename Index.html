@@ -1,1 +1,429 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+    <meta charset="UTF-8">
+    <title>FINAL RETRO ASTEROIDS - Polished</title>
+    <style>
+        /* रेट्रो पिक्सल फॉन्ट */
+        @font-face {
+            font-family: 'PixelEmulator';
+            src: url('https://fonts.cdnfonts.com/s/72886/PixelEmulator-VPn5B.woff') format('woff');
+        }
 
+        body {
+            background-color: #1a1a1a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            color: white;
+            font-family: 'PixelEmulator', 'Courier New', monospace; 
+            overflow: hidden;
+            user-select: none;
+        }
+        canvas {
+            border: 4px solid #fff;
+            background-color: #000;
+            image-rendering: pixelated; 
+            box-shadow: 0 0 25px rgba(0, 255, 0, 0.5); 
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            text-align: center;
+            width: 100%;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #highScore {
+            color: #ff00ff; 
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1>RETR0 ASTEROIDS v3.2 (FINAL)</h1>
+        <p>Score: <span id="scoreEl">0</span> | Lives: <span id="livesEl">3</span> | High Score: <span id="highScore">0</span></p>
+        <p style="font-size: 10px; margin-top: 5px;">Controls: Arrows (Move/Rotate), Space (Shoot) | **Click/Key to Enable Sound!**</p>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    const scoreEl = document.getElementById("scoreEl");
+    const livesEl = document.getElementById("livesEl");
+    const highScoreEl = document.getElementById("highScore");
+
+    canvas.width = 800;
+    canvas.height = 600;
+
+    // --- स्थिरांक (Constants) ---
+    const FPS = 60;
+    const SHIP_SIZE = 30;
+    const INVICIBILITY_DURATION = 3 * FPS;
+    const THRUST_TRAIL_DURATION = 5; 
+    const ROIDS_SIZES = [50, 25, 12.5]; 
+    const ROIDS_NUM = 4; 
+    const THRUST_SFX_INTERVAL = 5; // थ्रस्ट SFX हर 5 फ्रेम में बजेगा
+
+    // --- गेम स्टेट वैरिएबल्स (Game State Variables) ---
+    let score = 0;
+    let highScore = localStorage.getItem("highScore") || 0; 
+    let lives = 3;
+    let gameOver = false;
+    let level = 0;
+    let screenFlashTimer = 0; // नया: स्क्रीन फ्लैश टाइमर
+
+    // जहाज, एस्टेरॉयड, लेजर, और कणों (Particles) की लिस्ट
+    let ship = { x: canvas.width / 2, y: canvas.height / 2, a: 90 / 180 * Math.PI, r: SHIP_SIZE / 2, rot: 0, thrusting: false, thrust: { x: 0, y: 0 }, dead: false, invicibilityTimer: INVICIBILITY_DURATION, thrustTrail: 0, laserFlash: 0, thrustSFXTimer: 0 };
+    let roids = [];
+    let lasers = [];
+    let particles = []; // नया: धमाके के लिए कण
+
+    // --- 🎶 साउंड लॉजिक (Web Audio API) ---
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    const audioCtx = new AudioContext();
+    let bassOscillator, trebleOscillator;
+
+    function playSound(frequency, duration, volume, type = 'sine') {
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+
+        gainNode.gain.setValueAtTime(volume, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+
+        oscillator.connect(gainNode).connect(audioCtx.destination);
+        oscillator.start(audioCtx.currentTime);
+        oscillator.stop(audioCtx.currentTime + duration);
+    }
+    
+    function playLaser() { playSound(880, 0.1, 0.2, 'square'); }
+    function playExplosion(sizeIndex) { 
+        for (let i = 0; i < 5; i++) {
+            playSound(100 + sizeIndex * 50 + Math.random() * 200, 0.3, 0.1, 'sawtooth');
+        }
+    }
+    function playThrust() { playSound(40 + Math.random() * 20, 0.05, 0.05, 'square'); }
+    function playShipDeath() { playSound(30, 0.5, 0.3, 'square'); playSound(50, 0.5, 0.3, 'sawtooth'); } // जहाज की मृत्यु का SFX
+
+    function startMusic() {
+        if (bassOscillator) return; 
+
+        bassOscillator = audioCtx.createOscillator();
+        bassOscillator.type = 'sawtooth';
+        bassOscillator.frequency.setValueAtTime(60, audioCtx.currentTime); 
+        let bassGain = audioCtx.createGain();
+        bassGain.gain.setValueAtTime(0.05, audioCtx.currentTime); 
+
+        trebleOscillator = audioCtx.createOscillator();
+        trebleOscillator.type = 'triangle';
+        trebleOscillator.frequency.setValueAtTime(120, audioCtx.currentTime);
+        let trebleGain = audioCtx.createGain();
+        trebleGain.gain.setValueAtTime(0.03, audioCtx.currentTime); 
+
+        bassOscillator.connect(bassGain).connect(audioCtx.destination);
+        trebleOscillator.connect(trebleGain).connect(audioCtx.destination);
+
+        bassOscillator.start();
+        trebleOscillator.start();
+        
+        function pulseMusic() {
+            let now = audioCtx.currentTime;
+            bassGain.gain.setValueAtTime(0.05, now);
+            bassGain.gain.linearRampToValueAtTime(0.03, now + 0.5); 
+            bassGain.gain.linearRampToValueAtTime(0.05, now + 1.0); 
+
+            trebleGain.gain.setValueAtTime(0.03, now);
+            trebleGain.gain.linearRampToValueAtTime(0.01, now + 0.5); 
+            trebleGain.gain.linearRampToValueAtTime(0.03, now + 1.0); 
+            
+            if (!gameOver) {
+                setTimeout(pulseMusic, 1000); 
+            }
+        }
+        pulseMusic();
+    }
+
+    function stopMusic() {
+        if (bassOscillator) {
+            bassOscillator.stop();
+            bassOscillator = null;
+        }
+        if (trebleOscillator) {
+            trebleOscillator.stop();
+            trebleOscillator = null;
+        }
+    }
+
+    // यूजर इंटरैक्शन से ऑडियो शुरू करने के लिए इवेंट लिसनर
+    document.body.addEventListener('click', startMusic, { once: true });
+    document.body.addEventListener('keydown', startMusic, { once: true });
+
+
+    // --- स्टार्स लॉजिक ---
+    const NUM_STARS = 100;
+    let stars = [];
+
+    function initStars() {
+        for (let i = 0; i < NUM_STARS; i++) {
+            stars.push({
+                x: Math.random() * canvas.width,
+                y: Math.random() * canvas.height,
+                radius: Math.random() * 1.5,
+                alpha: Math.random(),
+                xv: (Math.random() - 0.5) * 0.1,
+                yv: (Math.random() - 0.5) * 0.1
+            });
+        }
+    }
+
+    function drawStars() {
+        ctx.fillStyle = "white";
+        for (let star of stars) {
+            star.x += star.xv;
+            star.y += star.yv;
+
+            if (star.x < 0) star.x = canvas.width; else if (star.x > canvas.width) star.x = 0;
+            if (star.y < 0) star.y = canvas.height; else if (star.y > canvas.height) star.y = 0;
+
+            ctx.globalAlpha = star.alpha;
+            ctx.beginPath();
+            ctx.arc(star.x, star.y, star.radius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            star.alpha += (Math.random() - 0.5) * 0.05;
+            if (star.alpha > 1) star.alpha = 1;
+            if (star.alpha < 0.2) star.alpha = 0.2; 
+        }
+        ctx.globalAlpha = 1; 
+    }
+    
+    // --- एस्टेरॉयड और कण लॉजिक ---
+    function createAsteroidBelt() {
+        level++;
+        roids = [];
+        screenFlashTimer = 5; // नया: लेवल शुरू होने पर स्क्रीन फ्लैश
+        for (let i = 0; i < ROIDS_NUM + level * 0.5; i++) { 
+            newAsteroid(ROIDS_SIZES[0], i); 
+        }
+    }
+
+    function newAsteroid(r, index) {
+        let x, y;
+        do {
+            x = Math.random() * canvas.width;
+            y = Math.random() * canvas.height;
+        } while (Math.hypot(ship.x - x, ship.y - y) < ROIDS_SIZES[0] * 3); 
+
+        let lvlMult = 1 + 0.1 * level;
+        let sizeIndex = ROIDS_SIZES.indexOf(r);
+        
+        roids.push({
+            x: x,
+            y: y,
+            xv: (Math.random() * 2 - 1) * lvlMult, 
+            yv: (Math.random() * 2 - 1) * lvlMult,
+            r: r,
+            sizeIndex: sizeIndex
+        });
+    }
+
+    function destroyAsteroid(index) {
+        let roid = roids[index];
+        playExplosion(roid.sizeIndex); 
+
+        score += (ROIDS_SIZES.length - roid.sizeIndex) * 100;
+        scoreEl.innerText = score;
+        
+        if (score > highScore) {
+            highScore = score;
+            highScoreEl.innerText = highScore;
+            localStorage.setItem("highScore", highScore);
+        }
+
+        // टुकड़ों में तोड़ना
+        if (roid.sizeIndex < ROIDS_SIZES.length - 1) {
+            let newSize = ROIDS_SIZES[roid.sizeIndex + 1];
+            
+            newAsteroidSplit(roid.x, roid.y, newSize, roid.xv + 1, roid.yv + 1);
+            newAsteroidSplit(roid.x, roid.y, newSize, roid.xv - 1, roid.yv - 1);
+        }
+
+        roids.splice(index, 1);
+
+        if (roids.length === 0) {
+            createAsteroidBelt();
+        }
+    }
+
+    function createExplosion(x, y, color = "white", num = 10) {
+        // जहाज या एस्टेरॉयड के धमाके के लिए कण बनाना
+        for (let i = 0; i < num; i++) {
+            particles.push({
+                x: x,
+                y: y,
+                xv: (Math.random() * 4 - 2),
+                yv: (Math.random() * 4 - 2),
+                life: 30, // 30 फ्रेम्स तक रहेगा
+                color: color
+            });
+        }
+    }
+    
+    function updateAndDrawParticles() {
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.x += p.xv;
+            p.y += p.yv;
+            p.life--;
+            
+            // धीमा करना
+            p.xv *= 0.95;
+            p.yv *= 0.95;
+
+            // कण को ड्रा करना
+            ctx.fillStyle = p.color;
+            ctx.globalAlpha = p.life / 30; // जीवन के साथ हल्का होना
+            ctx.fillRect(p.x, p.y, 2, 2);
+            ctx.globalAlpha = 1;
+
+            if (p.life <= 0) {
+                particles.splice(i, 1);
+            }
+        }
+    }
+
+    // --- जहाज और गेम कण्ट्रोल ---
+    function resetShip() {
+        ship.x = canvas.width / 2;
+        ship.y = canvas.height / 2;
+        ship.thrust.x = 0;
+        ship.thrust.y = 0;
+        ship.a = 90 / 180 * Math.PI;
+        ship.dead = false;
+        ship.invicibilityTimer = INVICIBILITY_DURATION; 
+        lasers = [];
+    }
+
+    function resetGame() {
+        lives = 3;
+        score = 0;
+        level = 0;
+        scoreEl.innerText = score;
+        livesEl.innerText = lives;
+        resetShip();
+        createAsteroidBelt();
+        gameOver = false;
+        particles = []; // सुनिश्चित करें कि कण साफ़ हो जाएं
+        loop();
+    }
+
+    function shootLaser() {
+        if (lasers.length < LASER_MAX && !ship.dead) {
+            lasers.push({
+                x: ship.x + 4/3 * ship.r * Math.cos(ship.a),
+                y: ship.y - 4/3 * ship.r * Math.sin(ship.a),
+                xv: 500 * Math.cos(ship.a) / FPS,
+                yv: -500 * Math.sin(ship.a) / FPS,
+            });
+            playLaser(); 
+            ship.laserFlash = 2; 
+        }
+    }
+    
+    // --- मेन गेम लूप (Main Game Loop) ---
+    function loop() {
+        // --- 1. GAME OVER चेक ---
+        if(gameOver) {
+            stopMusic();
+            
+            ctx.fillStyle = "black";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            drawStars();
+
+            ctx.fillStyle = "white";
+            ctx.font = "40px PixelEmulator"; 
+            ctx.textAlign = "center";
+            ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 2 - 20);
+            ctx.font = "20px PixelEmulator";
+            ctx.fillText("Final Score: " + score, canvas.width / 2, canvas.height / 2 + 20);
+            
+            if (score > localStorage.getItem("highScore") && (Math.floor(Date.now() / 250) % 2 === 0)) {
+                 ctx.fillStyle = "#ff00ff";
+                 ctx.fillText("NEW HIGH SCORE!", canvas.width / 2, canvas.height / 2 - 60);
+                 ctx.fillStyle = "white";
+            } else if (score <= localStorage.getItem("highScore")) {
+                 ctx.fillText("High Score: " + highScore, canvas.width / 2, canvas.height / 2 - 60);
+            }
+            
+            ctx.fillText("Press Space to Restart", canvas.width / 2, canvas.height / 2 + 60);
+            return;
+        }
+
+        // --- 2. UPDATE LOGIC ---
+        ship.a += ship.rot;
+        ship.thrustTrail = Math.max(0, ship.thrustTrail - 1);
+        ship.laserFlash = Math.max(0, ship.laserFlash - 1);
+        ship.thrustSFXTimer = Math.max(0, ship.thrustSFXTimer - 1);
+        screenFlashTimer = Math.max(0, screenFlashTimer - 1);
+
+        if (ship.thrusting) {
+            ship.thrust.x += 5 * Math.cos(ship.a) / FPS;
+            ship.thrust.y -= 5 * Math.sin(ship.a) / FPS;
+            if (ship.thrustSFXTimer === 0) {
+                playThrust(); // थ्रस्ट SFX
+                ship.thrustSFXTimer = THRUST_SFX_INTERVAL;
+            }
+        } else {
+            ship.thrust.x -= 0.7 * ship.thrust.x / FPS;
+            ship.thrust.y -= 0.7 * ship.thrust.y / FPS;
+        }
+        
+        ship.x += ship.thrust.x;
+        ship.y += ship.thrust.y;
+        
+        // स्क्रीन रैपिंग (सभी के लिए)
+        if (ship.x < 0 - ship.r) ship.x = canvas.width + ship.r; else if (ship.x > canvas.width + ship.r) ship.x = 0 - ship.r;
+        if (ship.y < 0 - ship.r) ship.y = canvas.height + ship.r; else if (ship.y > canvas.height + ship.r) ship.y = 0 - ship.r;
+
+        for (let roid of roids) {
+            roid.x += roid.xv;
+            roid.y += roid.yv;
+            if (roid.x < 0 - roid.r) roid.x = canvas.width + roid.r; else if (roid.x > canvas.width + roid.r) roid.x = 0 - roid.r;
+            if (roid.y < 0 - roid.r) roid.y = canvas.height + roid.r; else if (roid.y > canvas.height + roid.r) roid.y = 0 - roid.r;
+        }
+
+        for (let i = lasers.length - 1; i >= 0; i--) {
+            let laser = lasers[i];
+            laser.x += laser.xv;
+            laser.y += laser.yv;
+
+            if (laser.x < 0 || laser.x > canvas.width || laser.y < 0 || laser.y > canvas.height) { lasers.splice(i, 1); continue; }
+
+            let roidHit = false;
+            for (let j = roids.length - 1; j >= 0; j--) {
+                if (Math.hypot(laser.x - roids[j].x, laser.y - roids[j].y) < roids[j].r) {
+                    destroyAsteroid(j); 
+                    roidHit = true;
+                    break;
+                }
+            }
+            if (roidHit) { lasers.splice(i, 1); }
+        }
+        
+        if (!ship.dead && ship.invicibilityTimer === 0) {
+            for (let i = 0; i < roids.length; i++) {
+                if (Math.hypot(ship.x - roids[i].x, ship.y - roids[i].y) < ship.r + roids[i].r) {
+                    lives--;
+                    livesEl.innerText = lives;
+                    playShipDeath(); // SFX: जहाज नष्ट
+                    createExplosion(ship.x, ship.y, "red", 15
